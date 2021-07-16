@@ -4,7 +4,6 @@ COPY . .
 RUN GOPROXY=off CGO_ENABLED=0 GOOS=linux go build
 
 FROM alpine:latest  
-# RUN apk --no-cache add ca-certificates
 WORKDIR /app
 COPY --from=build /app/userreg .
-CMD ["./userreg"]  
+CMD ["./userreg", "userreg.conf"]
