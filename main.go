@@ -112,8 +112,31 @@ func registerUser(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if destOrg == nil {
-		httpUserErrorf(w, "organization not present in chirpstack: %q", oidcClaims.SchacHomeOrganization)
-		return
+		basicName := ""
+		for _, c := range strings.ToLower(oidcClaims.SchacHomeOrganization) {
+			if c == '.' {
+				basicName += "-"
+			} else if c >= 'a' && c <= 'z' || c >= '0' && c <= '9' {
+				basicName += string(c)
+			}
+		}
+		req := &api.CreateOrganizationRequest{
+			Organization: &api.Organization{
+				Name:            basicName,
+				DisplayName:     oidcClaims.SchacHomeOrganization,
+				CanHaveGateways: true,
+			},
+		}
+		resp, err := orgClient.Create(r.Context(), req)
+		if err != nil {
+			httpServerErrorf(w, "creating organization %q %q in chirpstack: %v", basicName, oidcClaims.SchacHomeOrganization, err)
+			return
+		}
+		destOrg = &api.OrganizationListItem{
+			Id:          resp.Id,
+			Name:        req.Organization.Name,
+			DisplayName: req.Organization.DisplayName,
+		}
 	}
 
 	userClient := api.NewUserServiceClient(conn)
