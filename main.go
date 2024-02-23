@@ -8,11 +8,10 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/brocaar/chirpstack-api/go/v3/as/external/api"
+	"github.com/chirpstack/chirpstack/api/go/v4/api"
 	"github.com/mjl-/sconf"
 	"google.golang.org/grpc"
 )
@@ -21,9 +20,8 @@ var listenAddress = flag.String("listen", ":8080", "address to listen on")
 
 var config struct {
 	Chirpstack struct {
-		Address  string `sconf-doc:"Address in host:port format for connecting to chirpstack, eg as:8080."`
-		Username string `sconf-doc:"For logging into chirpstack."`
-		Password string `sconf-doc:"For logging into chirpstack."`
+		Address string `sconf-doc:"Address in host:port format for connecting to chirpstack, eg chirpstack:8080."`
+		ApiKey  string `sconf-doc:"ChirpStack API Key."`
 	} `sconf-doc:"The chirpstack to which this controlapp is linked."`
 }
 
@@ -53,33 +51,23 @@ func main() {
 }
 
 func registerUser(w http.ResponseWriter, r *http.Request) {
-	userIDStr := r.FormValue("user_id")
-	claims := r.FormValue("oidc_claims")
-	log.Printf("/registeruser, user_id %v, oidc_claims %s", userIDStr, claims)
-
-	if userIDStr == "" {
-		httpUserErrorf(w, "missing user_id parameter")
-		return
-	}
-	if claims == "" {
-		httpUserErrorf(w, "missing oidc_claims parameter")
-		return
-	}
-
 	var oidcClaims struct {
 		SchacHomeOrganization  string   `json:"schac_home_organization"`
 		EdupersonAffiliation   []string `json:"eduperson_affiliation"`
 		EdupersonPrincipalName string   `json:"eduperson_principal_name"`
 	}
 
-	if err := json.Unmarshal([]byte(claims), &oidcClaims); err != nil {
-		httpUserErrorf(w, "oidc_claims user_id parameter: %v", err)
+	userID := r.FormValue("user_id")
+	err := json.NewDecoder(r.Body).Decode(&oidcClaims)
+	if err != nil {
+		httpUserErrorf(w, "decode oidc claims error: %s", err)
 		return
 	}
 
-	userID, err := strconv.Atoi(userIDStr)
-	if err != nil {
-		httpUserErrorf(w, "bad user_id parameter: %v", err)
+	log.Printf("/registeruser, user_id %v, oidc_claims %s", userID, oidcClaims)
+
+	if userID == "" {
+		httpUserErrorf(w, "missing user_id parameter")
 		return
 	}
 
@@ -97,50 +85,40 @@ func registerUser(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	orgClient := api.NewOrganizationServiceClient(conn)
+	tenantClient := api.NewTenantServiceClient(conn)
 
-	listResp, err := orgClient.List(r.Context(), &api.ListOrganizationRequest{Limit: 10000})
+	listResp, err := tenantClient.List(r.Context(), &api.ListTenantsRequest{Limit: 10000})
 	if err != nil {
 		httpServerErrorf(w, "listing organizations: %v", err)
 		return
 	}
-	var destOrg *api.OrganizationListItem
-	for _, org := range listResp.Result {
-		if org.DisplayName == oidcClaims.SchacHomeOrganization {
-			destOrg = org
+	var destTenant *api.TenantListItem
+	for _, t := range listResp.Result {
+		if t.Name == oidcClaims.SchacHomeOrganization {
+			destTenant = t
 			break
 		}
 	}
-	if destOrg == nil {
-		basicName := ""
-		for _, c := range strings.ToLower(oidcClaims.SchacHomeOrganization) {
-			if c == '.' {
-				basicName += "-"
-			} else if c >= 'a' && c <= 'z' || c >= '0' && c <= '9' {
-				basicName += string(c)
-			}
-		}
-		req := &api.CreateOrganizationRequest{
-			Organization: &api.Organization{
-				Name:            basicName,
-				DisplayName:     oidcClaims.SchacHomeOrganization,
+	if destTenant == nil {
+		req := &api.CreateTenantRequest{
+			Tenant: &api.Tenant{
+				Name:            oidcClaims.SchacHomeOrganization,
 				CanHaveGateways: true,
 			},
 		}
-		resp, err := orgClient.Create(r.Context(), req)
+		resp, err := tenantClient.Create(r.Context(), req)
 		if err != nil {
-			httpServerErrorf(w, "creating organization %q %q in chirpstack: %v", basicName, oidcClaims.SchacHomeOrganization, err)
+			httpServerErrorf(w, "creating tenant %q in chirpstack: %v", oidcClaims.SchacHomeOrganization, err)
 			return
 		}
-		destOrg = &api.OrganizationListItem{
-			Id:          resp.Id,
-			Name:        req.Organization.Name,
-			DisplayName: req.Organization.DisplayName,
+		destTenant = &api.TenantListItem{
+			Id:   resp.Id,
+			Name: req.Tenant.Name,
 		}
 	}
 
 	userClient := api.NewUserServiceClient(conn)
-	userResp, err := userClient.Get(r.Context(), &api.GetUserRequest{Id: int64(userID)})
+	userResp, err := userClient.Get(r.Context(), &api.GetUserRequest{Id: userID})
 	if err != nil {
 		httpServerErrorf(w, "fetching user from chirpstack for userID %d: %v", userID, err)
 		return
@@ -153,30 +131,28 @@ func registerUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	addUserReq := &api.AddOrganizationUserRequest{
-		OrganizationUser: &api.OrganizationUser{
-			OrganizationId: destOrg.Id,
-			Email:          userResp.User.Email,
+	addUserReq := &api.AddTenantUserRequest{
+		TenantUser: &api.TenantUser{
+			TenantId: destTenant.Id,
+			Email:    userResp.User.Email,
 		},
 	}
-	if _, err := orgClient.AddUser(r.Context(), addUserReq); err != nil {
-		httpServerErrorf(w, "adding user to organization: %v", err)
+	if _, err := tenantClient.AddUser(r.Context(), addUserReq); err != nil {
+		httpServerErrorf(w, "adding user to tenant: %v", err)
 		return
 	}
 
-	fmt.Fprintf(w, "user %d added to organization %q (%d)\n", userID, destOrg.DisplayName, destOrg.Id)
+	fmt.Fprintf(w, "user %d added to tenant %q (%d)\n", userID, &destTenant.Name, destTenant.Id)
 }
-
-var apiToken string
 
 type apitoken struct{}
 
 func (a apitoken) GetRequestMetadata(ctx context.Context, url ...string) (map[string]string, error) {
-	if apiToken == "" {
+	if config.Chirpstack.ApiKey == "" {
 		return map[string]string{}, nil
 	}
 	return map[string]string{
-		"authorization": fmt.Sprintf("Bearer %s", apiToken),
+		"authorization": fmt.Sprintf("Bearer %s", config.Chirpstack.ApiKey),
 	}, nil
 }
 
@@ -197,13 +173,6 @@ func dial() (*grpc.ClientConn, error) {
 		return nil, fmt.Errorf("dial %s: %v", config.Chirpstack.Address, err)
 	}
 
-	intClient := api.NewInternalServiceClient(conn)
-	resp, err := intClient.Login(context.Background(), &api.LoginRequest{Email: config.Chirpstack.Username, Password: config.Chirpstack.Password})
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("login: %v", err)
-	}
-	apiToken = resp.Jwt
 	return conn, nil
 }
 
