@@ -6,7 +6,7 @@ check:
 	staticcheck
 
 docker:
-	docker build -t userreg:latest .
+	docker build -t userreg-v4:latest .
 
 clean:
 	go clean
